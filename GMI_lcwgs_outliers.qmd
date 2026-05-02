@@ -1,0 +1,336 @@
+---
+title: "GMI_lcwgs_outliers"
+author: "A. Sawkins"
+format: html
+---
+
+
+## Load packages
+
+```{r}
+c("here", "tidyverse", "Biostrings", "rtracklayer", "GenomicRanges") |>
+  lapply(library, character.only = TRUE) |> invisible()
+
+```
+
+## Load functions
+
+#Custom function from: https://github.com/Arthur-Oules/EJA_lcwgs_GenPop
+```{r}
+
+Get_outliers <- function(pcadapt,
+                         method           = "bonferroni",
+                         pvalue_threshold = .1,
+                         minimize_length  = TRUE) {
+  
+  if (method == "bonferroni") {
+    outliers_positions <- readRDS(file = here("data", "SNP_positions.rds")) |> 
+      mutate(
+        logpvalues = Get_pvalues(pcadapt),
+        padj       = p.adjust(pcadapt$pvalues, method = "bonferroni") # Extract adjusted pvalues
+      ) |>
+      filter(padj < pvalue_threshold)  # Get outliers from pvalues
+    
+  } else if (method == "manual") {
+    outliers_positions <- readRDS(file = here("data", "SNP_positions.rds")) |> 
+      mutate( 
+        pvalues    = pcadapt$pvalues,
+        logpvalues = Get_pvalues(pcadapt)
+      ) |> # Extract pvalues
+      filter(is.na(pvalues) == FALSE) |> # Remove NAs
+      filter(logpvalues >= pvalue_threshold)
+    
+  } else {
+    stop("Method not recognized.")
+  }
+  
+  print(paste0("There are ", as.character(dim(outliers_positions)[1]), " outliers SNPs."))
+  
+  if (isTRUE(minimize_length)&(dim(outliers_positions)[1]) > 34000) {
+    outliers_positions <- outliers_positions |>
+      arrange(desc(logpvalues), CHROM, POS) |> 
+      filter(row_number() <= 34000) |> 
+      arrange(CHROM, POS)
+    
+    print(paste0("Outliers number was reduced to 34.000 lowest pvalues."))
+  }
+  
+  outliers_positions
+}
+```
+
+
+## Outlier detection
+````{r}
+pcadapt_lcwgs_all <- read_rds(here("output", "pcadapt_lcwgs_all_K2.rds"))
+
+SNP_positions <- readRDS(file = here("data", "SNP_positions.rds"))
+
+outliers <- Get_outliers(pcadapt_lcwgs_all, pvalue_threshold = 1e-300) |> 
+  left_join(
+    SNP_positions %>% mutate(SNP_index = row_number()) %>% select(CHROM, POS, SNP_index),
+    by = c("CHROM", "POS")
+  ) |> 
+  mutate(
+    pval = pcadapt_lcwgs_all$pvalues[SNP_index]
+  ) %>% 
+  select(CHROM, POS, pval)
+
+write_csv(outliers, "all_k2_outliers_1E300.csv")
+
+````
+
+
+## Load reference: the FASTA your lcWGS reads were originally mapped to
+```{r}
+
+ref <- readDNAStringSet(here("data", "GMI_no_contaminants.fasta"))
+names(ref)
+
+window <- 250
+
+extract_window <- function(CHROM, POS, window = 250) {
+  seq <- ref[[CHROM]]       # this is a DNAString
+  seqlen <- length(seq)     # correct for DNAString
+  
+  start <- max(1, POS - window)
+  end   <- min(seqlen, POS + window)
+  
+  subseq(seq, start = start, end = end)
+}
+
+```
+
+
+## Extract read windows
+```{r}
+# use only CHROM and POS for extraction
+seqs <- pmap(
+  outliers[, c("CHROM", "POS")],
+  \(CHROM, POS) extract_window(CHROM, POS)
+)
+
+# append p-value to names
+names(seqs) <- paste0(
+  outliers$CHROM,
+  "_pos", outliers$POS
+)
+
+#saving fasta windows for outliers
+writeXStringSet(
+  DNAStringSet(seqs),
+  "all_outlier_windows_1E300.fasta"
+)
+```
+
+
+## BLAST batch loop against ocal Periophthalmus (mudskipper) genome database
+```{r}
+
+seqs <- readDNAStringSet("all_outlier_windows_1E300.fasta")
+
+batch_size <- 1000
+n_batches <- ceiling(length(seqs)/batch_size)
+
+
+blast_db <- "/Users/asawkins/BLAST/db/Periophthalmus"
+
+out_dir <- here("output", "blast_batches")
+dir.create(out_dir, showWarnings = FALSE)
+
+# Loop over batches
+for(i in seq_len(n_batches)){
+  start <- (i-1)*batch_size + 1
+  end   <- min(i*batch_size, length(seqs))
+  
+  batch_file <- file.path(out_dir, paste0("batch_", i, ".fasta"))
+  writeXStringSet(seqs[start:end], filepath = batch_file)
+  
+  out_file <- file.path(out_dir, paste0("blast_results_batch_", i, ".tsv"))
+  
+  system2(
+  "/usr/local/ncbi-blast/bin/blastn",
+    args = c(
+      "-query", batch_file,
+      "-db", blast_db,
+      "-out", out_file,
+      "-outfmt", "'6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore'",
+      "-max_target_seqs", "5",
+      "-num_threads", "4" 
+  )
+  )
+}
+
+# Read and combine results
+blast_files <- list.files(out_dir, pattern = "blast_results_batch_.*\\.tsv$", full.names = TRUE)
+
+blast_hits <- lapply(blast_files, function(f){
+  read.table(f, sep = "\t", header = FALSE, stringsAsFactors = FALSE)
+}) |> bind_rows()
+
+colnames(blast_hits) <- c(
+  "qseqid","sseqid","pident","length","mismatch",
+  "gapopen","qstart","qend","sstart","send","evalue","bitscore"
+)
+
+head(blast_hits)
+
+```
+
+## Filter Blast hits 
+```{r}
+
+blast_filt <- blast_hits %>%
+  filter(
+    evalue <= 1e-10, #guards against random matches
+    pident >= 80, #percent identity
+    length >= 200 #bp length
+  )
+
+```
+
+## Keep Best hit per query
+```{r}
+best_hits <- blast_filt %>%
+  arrange(qseqid, evalue, desc(bitscore)) %>%
+  group_by(qseqid) %>%
+  dplyr::slice(1) %>%
+  ungroup()
+
+```
+
+
+## Import GFF annotation
+```{r}
+
+# Import annotation
+gff <- import(here("Periophthalmus", "genomic.gff"))
+
+# Keep only gene features
+genes <- gff[gff$type == "gene"]
+
+```
+
+
+## Fix mismatch between sseqid and name of genes in gff:
+```{r}
+# Clean contig names to match annotation
+best_hits <- best_hits %>%
+  mutate(sseqid_clean = gsub("^ref\\||\\|$", "", sseqid))
+
+# Ensure start <= end
+sstart_fixed <- pmin(best_hits$sstart, best_hits$send)
+send_fixed   <- pmax(best_hits$sstart, best_hits$send)
+
+
+```
+
+
+## Annotate outliers
+```{r}
+
+# --- Convert best_hits to GRanges ---
+best_gr <- GRanges(
+  seqnames = gsub("^ref\\||\\|$", "", best_hits$sseqid), # clean contig names
+  ranges   = IRanges(start = sstart_fixed, end = send_fixed),
+  strand   = "*"
+)
+mcols(best_gr) <- best_hits  # keep all blast info
+
+# --- Import  gene annotation 
+genes <- gff[gff$type == "gene"]
+
+# --- Find overlaps between outlier windows and genes ---
+hits_genes <- findOverlaps(best_gr, genes)
+
+# --- Combine info into a table ---
+annotated_hits <- tibble(
+  qseqid      = best_gr$qseqid[queryHits(hits_genes)],
+  sseqid      = best_gr$seqnames[queryHits(hits_genes)],
+  gene_ID     = genes$ID[subjectHits(hits_genes)],
+  gene_name   = genes$Name[subjectHits(hits_genes)],
+  description = genes$description[subjectHits(hits_genes)],
+  pident      = best_gr$pident[queryHits(hits_genes)],
+  evalue      = best_gr$evalue[queryHits(hits_genes)],
+  bitscore    = best_gr$bitscore[queryHits(hits_genes)]
+)
+
+# --- Check results ---
+head(annotated_hits)
+nrow(annotated_hits)  # how many outlier windows got annotated
+
+# --- Save for downstream analysis ---
+write_csv(annotated_hits, here("output", "outlier_windows_annotated_best_hits.csv"))
+
+```
+
+
+## Count how many outlier windows hit each gene
+```{r}
+gene_summary <- annotated_hits %>%
+  group_by(gene_ID, gene_name, description) %>%   # group by gene
+  summarise(
+    n_hits = n(),               # count how many windows hit this gene
+    max_pident = max(pident),   # optional: max percent identity
+    min_evalue = min(evalue),   # optional: best e-value
+    max_bitscore = max(bitscore) # optional: best bitscore
+  ) %>%
+  arrange(desc(n_hits))          # sort by most hits
+```
+
+
+## Retrieve Protein IDs
+```{r}
+
+# Load genome 
+genome <- readDNAStringSet(here("Periophthalmus", "GCF_009829125.3_fPerMag1.2.pri_genomic.fna"))
+names(genome) <- sapply(strsplit(names(genome), " "), `[`, 1)
+
+# Load annotation
+gff <- import(here("Periophthalmus", "genomic.gff"))
+
+# Subset to CDS
+cds <- gff[gff$type == "CDS"]
+
+# Find overlapping CDS
+hits_cds <- findOverlaps(best_gr, cds)
+
+# Extract the CDS that overlap each hit
+overlapping_cds <- cds[subjectHits(hits_cds)]
+
+# Get protein IDs for each hit
+protein_ids <- overlapping_cds$protein_id
+
+# Add to your best_hits table
+best_hits$protein_id <- NA
+best_hits$protein_id[queryHits(hits_cds)] <- protein_ids
+
+
+write_csv(best_hits, here("output", "protein_coding_best_hits.csv"))
+
+```
+
+
+## Retrieve AA seqs: KEGG Koala
+```{r}
+
+# --- Load the protein FASTA ---
+proteins <- readAAStringSet(here("Periophthalmus", "protein.faa"))
+names(proteins) <- sapply(strsplit(names(proteins), " "), `[`, 1)
+
+
+# ---  Subset to your best hits ---
+# Assuming best_hits$sseqid contains the protein IDs from BLAST
+aa_hits <- proteins[names(proteins) %in% best_hits$protein_id]
+
+# --- Inspect first few sequences ---
+aa_hits[1:5]
+
+# ---  Save to a FASTA file ---
+writeXStringSet(aa_hits, here("output", "best_hit_proteins.fasta"))
+
+
+```
+
+
+

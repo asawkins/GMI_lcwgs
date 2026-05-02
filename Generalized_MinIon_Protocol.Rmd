@@ -1,0 +1,542 @@
+---
+title: "Generalized MinIon Hummingbird Protocol"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+### Preparation
+#### Downloading raw data to hummingbird
+First, you must sftp your raw MinIon files into hummingbird. Make a directory (`mkdir`) with the name of your MinIon Run and 3-letter species name. For example, my MinIon run was #42 and my species name is AAR, so I sftp my raw files into the following location(`pwd`): `/hb/groups/bernardi_lab/allyson/MinIon/42_AAR`
+  
+  
+#### Making `files` directory for guppy basecaller slurm
+Next, make another directory at the same level as the previous called "files". This is where we'll store the guppy basecaller slurm file.For example, my location looks like this:
+`/hb/groups/bernardi_lab/allyson/MinIon/files`  
+  
+    
+#### Making `fastq` directory for guppy basecaller output
+Finally, make another directory for the guppy basecaller output. At the same level as the previous two directories, you're going to make a directory with the name of your MinIon Run. Within this directory, make another called `fastq`. For example, my location looks like this:
+`/hb/groups/bernardi_lab/allyson/MinIon/RUN_42/fastq`
+
+
+### Guppy Basecaller
+Inside of the `files` directory, create(`nano`) the following slurm.
+
+``` {bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=guppy
+#SBATCH --output=guppy_RUN_42.out
+#SBATCH --error=guppy_RUN_42.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu #your email here
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --exclusive
+#SBATCH --ntasks-per-node=24
+
+# Above are all the specifics SLURM needs to run your specific job.
+
+# --ntasks-per-node will be used in doParallel.R to specify the number
+# of cores to use on the machine. Using 24
+
+# now load programs needed
+
+module load guppy
+
+
+#run the command:
+
+
+guppy_basecaller -c dna_r10.4_e8.1_sup.cfg --num_callers 24 --device cuda:0 --input_path /hb/groups/bernardi_lab/allyson/MinIon/42_AAR/ --save_path /hb/groups/bernardi_lab/allyson/MinIon/RUN_42/fastq
+```
+
+#### Notes:
+
+* Be sure that your input_path matches the location of your raw files and the save_path matches the empty `fastq` directory you just created.
+* You can check the status of the guppy slurm by `nano`ing your output file.
+
+
+
+
+### Concatenate all files into the BigFile  
+Inside of the guppy basecaller output directory will be a directory called `pass`. For example, my location looks like this: `/hb/groups/bernardi_lab/allyson/MinIon/RUN_42/fastq/pass`. These are sequences that have 'passed'.  
+Inside of this directory run the following, but change AAR = your species name and 42 = your MinIon run.  
+`cat * > AAR_42_BigFile.fastq` 
+  
+  
+Make a directory called `BigFiles` inside of your `files` directory. The location should look like this:
+`/hb/groups/bernardi_lab/allyson/MinIon/files/BigFiles`  
+  
+  
+Move the your concatenated file into the BigFiles directory with this code: `mv AAR_42_BigFile.fastq /hb/groups/bernardi_lab/allyson/MinIon/files/BigFiles`  
+  
+  
+If you have several runs, combine them into one BigFile. `cat AAR_42_BigFile_new.fastq AAR_43_BigFile_new.fastq > AAR_42_43_BigFile.fastq`
+
+#### NanoStat
+
+
+``` {bash eval = FALSE}
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/nanostat_v1.5.0
+
+NanoStat --fastq AAR_42_43_BigFile.fastq --threads 24 --name AAR_42_43_BigFile.fastq_statfastq_report
+```
+
+This is what the report (`nano AAR_42_43_BigFile.fastq_statfastq_report`) should look like: 
+``` {bash eval = FALSE}
+General summary:
+Mean read length:                 6,063.0
+Mean read quality:                   17.4
+Median read length:               5,805.0
+Median read quality:                 17.8
+Number of reads:              1,598,015.0
+Read length N50:                  7,245.0
+STDEV read length:                3,581.4
+Total bases:              9,688,781,468.0
+Number, percentage and megabases of reads above quality cutoffs
+>Q5:    1598015 (100.0%) 9688.8Mb
+>Q7:    1598015 (100.0%) 9688.8Mb
+>Q10:   1595588 (99.8%) 9675.7Mb
+>Q12:   1537877 (96.2%) 9335.7Mb
+>Q15:   1330254 (83.2%) 8149.7Mb
+Top 5 highest mean basecall quality scores and their read lengths
+1:	32.0 (262)
+2:	31.9 (341)
+3:	30.9 (287)
+4:	30.1 (495)
+5:	30.0 (952)
+Top 5 longest reads and their mean basecall quality score
+1:	685969 (15.5)
+2:	300236 (10.7)
+3:	294490 (13.6)
+4:	285378 (12.4)
+5:	278845 (14.8)
+```
+
+### Quality Checks: fastq_info and fastQC
+We'll check for fastq errors. First make sure your concatenated fastq files have correctly merged using Fastq Utils (v0.25.1).
+``` {bash eval = FALSE}
+#load miniconda
+module load miniconda3.9
+
+#activate fastq_utils
+conda activate /hb/groups/bernardi_lab/programs/fastq_utils_v0.25.1
+
+#run command
+fastq_info AAR_42_43_BigFile.fastq.gz
+```
+
+It'll spit out the following output.
+
+``` {bash eval = FALSE}
+fastq_utils 0.25.1
+DEFAULT_HASHSIZE=39000001
+Scanning and indexing all reads from AAR_42_43_BigFile.fastq.gz
+Read name provided with no suffix
+1500000Scanning complete.
+
+Reads processed: 1598015
+Memory used in indexing: ~401 MB
+------------------------------------
+Number of reads: 1598015
+Quality encoding range: 34 123
+Quality encoding: sanger
+Read length: 30 685969 5805
+OK
+```
+
+
+Then run FastQC (v0.11.7) on bigfile to get more detailed QC info on the reads:
+
+``` {bash eval = FALSE}
+module load fastqc
+
+module load java    #may not be necessary anymore, but if you get a java error, try loading this module
+
+
+fastqc  AAR_42_43_BigFile.fastq.gz -t 24 -o /hb/groups/bernardi_lab/allyson/MinIon/files/BigFiles/fastqc
+```
+
+
+
+
+
+### Porechop: Removes primers from reads
+First gzip your BigFile, `gzip AAR_42_43_BigFile.fastq` then you are ready to go.
+```{bash eval = FALSE}
+conda activate /hb/groups/bernardi_lab/programs/porechop_v2.4
+
+porechop -i AAR_42_43_BigFile.fastq.gz -o AAR_42_43_BigFile_pc.fastq --threads 24
+```
+  
+  
+The input (-i) is your gzip BigFile and the output (-o) is the same name but with "pc" for Porechop and no gz (it is not gzip). 
+
+#### Run Nanostats on the new porechopped file
+```{bash eval = FALSE}
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/nanostat_v1.5.0
+
+NanoStat --fastq AAR_42_43_BigFile_pc.fastq --threads 24 --name AAR_42_43_BigFile_pc.fastq_statfastq_report
+
+General summary:
+Mean read length:                 6,020.1
+Mean read quality:                   17.8
+Median read length:               5,767.0
+Median read quality:                 18.1
+Number of reads:              1,600,390.0
+Read length N50:                  7,207.0
+STDEV read length:                3,525.5
+Total bases:              9,634,505,989.0
+Number, percentage and megabases of reads above quality cutoffs
+>Q5:    1600390 (100.0%) 9634.5Mb
+>Q7:    1600388 (100.0%) 9634.5Mb
+>Q10:   1598322 (99.9%) 9622.6Mb
+>Q12:   1543130 (96.4%) 9290.3Mb
+>Q15:   1356761 (84.8%) 8159.6Mb
+Top 5 highest mean basecall quality scores and their read lengths
+1:	38.7 (323)
+2:	38.6 (258)
+3:	38.6 (206)
+4:	37.8 (301)
+5:	37.6 (233)
+Top 5 longest reads and their mean basecall quality score
+1:	455011 (15.3)
+2:	300193 (10.7)
+3:	294404 (13.6)
+4:	285378 (12.4)
+5:	245162 (15.4)
+```
+
+
+gzip the output file `gzip AAR_42_43_BigFile_pc.fastq` for the following QCs.
+
+#### Quality Controls
+Run fastq_info a on porechopped reads.
+
+```{bash eval = FALSE}
+conda activate /hb/groups/bernardi_lab/programs/fastq_utils_v0.25.1
+
+fastq_info AAR_42_43_BigFile_pc.fastq.gz
+
+fastq_utils 0.25.1
+DEFAULT_HASHSIZE=39000001
+Scanning and indexing all reads from AAR_42_43_BigFile_pc.fastq.gz
+Read name provided with no suffix
+1600000Scanning complete.
+
+Reads processed: 1600390
+Memory used in indexing: ~402 MB
+------------------------------------
+Number of reads: 1600390
+Quality encoding range: 34 123
+Quality encoding: sanger
+Read length: 30 455011 5767
+OK
+```
+
+Then run FastQC (v0.11.7) on porechopped reads to get more detailed QC info on the reads:
+
+```{bash eval = FALSE}
+module load fastqc
+
+fastqc  AAR_42_43_BigFile_pc.fastq.gz -t 24 -o /hb/groups/bernardi_lab/allyson/MinIon/files/BigFiles/fastqc_pc
+```
+
+## Nanofilt
+We're going to create two filtered sets of reads from the “bigfile”: one for longer reads of lower quality and one for shorter reads of higher quality.  
+In either case, 1000 or 500bp is the minimum size. Q value is quality.
+
+Create two slurms, still in the BigFile directory.
+
+name: nanofilt_AAR_42_43_1000q3.slurm
+
+```{bash eval = FALSE}
+
+#!/bin/bash
+#SBATCH --job-name=nanofilt
+#SBATCH --output=nanofilt_AAR_42_43_1000q3.out
+#SBATCH --error=nanofilt_AAR_42_43_1000q3.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+# Above are all the specifics SLURM needs to run your specific job.
+
+# --ntasks-per-node will be used in doParallel.R to specify the number
+# of cores to use on the machine. Using 24
+# now load programs needed
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/nanofilt
+
+gunzip -c AAR_42_43_BigFile_pc.fastq.gz | NanoFilt -q 3 -l 1000 | gzip > AAR_42_43_BigFile_pc_1000q3.fastq.gz
+```
+
+
+name: nanofilt_AAR_42_43_500q5.slurm
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=nanofilt
+#SBATCH --output=nanofilt_AAR_42_43_500q5.out
+#SBATCH --error=nanofilt_AAR_42_43_500q5.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+# Above are all the specifics SLURM needs to run your specific job.
+
+# --ntasks-per-node will be used in doParallel.R to specify the number
+# of cores to use on the machine. Using 24
+# now load programs needed
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/nanofilt
+
+gunzip -c AAR_42_43_BigFile_pc.fastq.gz | NanoFilt -q 5 -l 500 | gzip > AAR_42_43_BigFile_pc_500q5.fastq.gz
+```
+
+
+
+##### next align long reads into scaffolds using two different approaches: once using only the reads > 1000bp, and once using all reads > 500 bp
+
+
+
+name: wtdbg2_AAR_42_43_1000q3.slurm
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=wtdbg2
+#SBATCH --output=wtdbg2_AAR_42_43_1000q3.out
+#SBATCH --error=wtdbg2_AAR_42_43_1000q3.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/wtdbg2
+
+
+wtdbg2 -x ont -g 600m -t 24 -L 1000 -i AAR_42_43_BigFile_pc_1000q3.fastq.gz -fo AAR_42_43_BigFile_ont_1000q3 #reads > 1000bp
+```
+
+
+
+
+
+
+name: wtdbg2_AAR_42_43_500q5.slurm
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=wtdbg2
+#SBATCH --output=wtdbg2_AAR_42_43_500q5.out
+#SBATCH --error=wtdbg2_AAR_42_43_500q5.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/wtdbg2
+
+
+wtdbg2 -x ont -g 600m -t 24 -L 500 -i AAR_42_43_BigFile_pc_500q5.fastq.gz -fo AAR_42_43_BigFile_ont_500q5 #reads > 500bp
+```
+
+
+
+
+name: wtpoa_AAR_42_43_1000q3.slurm
+
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=wtpoa
+#SBATCH --output=wtpoa_AAR_42_43_1000q3.out
+#SBATCH --error=wtpoa_AAR_42_43_1000q3.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+# Above are all the specifics SLURM needs to run your specific job.
+
+# --ntasks-per-node will be used in doParallel.R to specify the number
+# of cores to use on the machine. Using 24
+# now load programs needed
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/wtdbg2
+
+wtpoa-cns -t 24 -i AAR_42_43_BigFile_ont_1000q3.ctg.lay.gz -fo AAR_42_43_BigFile_ont_1000q3.ctg.fa
+```
+
+
+
+
+
+name: wtpoa_AAR_42_43_500q5.slurm
+```{bash eval = FALSE}
+#!/bin/bash
+#SBATCH --job-name=wtpoa
+#SBATCH --output=wtpoa_AAR_42_43_500q5.out
+#SBATCH --error=wtpoa_AAR_42_43_500q5.err
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=asawkins@ucsc.edu
+#SBATCH --partition=128x24
+#SBATCH --nodes=1
+#SBATCH --mem=120
+#SBATCH --ntasks=24
+
+# Above are all the specifics SLURM needs to run your specific job.
+
+# --ntasks-per-node will be used in doParallel.R to specify the number
+# of cores to use on the machine. Using 24
+# now load programs needed
+
+#run the command:
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/wtdbg2
+
+wtpoa-cns -t 24 -i AAR_42_43_BigFile_ont_500q5.ctg.lay.gz -fo AAR_42_43_BigFile_ont_500q5.ctg.fa
+```
+
+
+## Getting stats on your new assemblies
+
+```{bash eval = FALSE}
+
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/assembly_stats
+
+
+
+assembly-stats AAR_42_43_BigFile_ont_1000q3.ctg.fa > AAR_42_43_BigFile_ont_1000q3.ctg.fa_assemblystats
+
+
+nano AAR_42_43_BigFile_ont_1000q3.ctg.fa_assemblystats
+
+stats for AAR_42_43_BigFile_ont_1000q3.ctg.fa
+sum = 570928074, n = 3203, ave = 178247.92, largest = 2100697
+N50 = 398382, n = 414
+N60 = 309802, n = 575
+N70 = 234894, n = 785
+N80 = 169400, n = 1069
+N90 = 93593, n = 1521
+N100 = 1364, n = 3203
+N_count = 0
+Gaps = 0
+
+
+
+assembly-stats AAR_42_43_BigFile_ont_500q5.ctg.fa > AAR_42_43_BigFile_ont_500q5.ctg.fa_assemblystats
+
+
+nano AAR_42_43_BigFile_ont_500q5.ctg.fa_assemblystats
+
+
+stats for AAR_42_43_BigFile_ont_500q5.ctg.fa
+sum = 570760426, n = 3226, ave = 176925.12, largest = 2584645
+N50 = 393010, n = 415
+N60 = 306073, n = 579
+N70 = 231984, n = 792
+N80 = 166533, n = 1079
+N90 = 92853, n = 1534
+N100 = 1364, n = 3226
+N_count = 0
+Gaps = 0
+```
+
+##########################
+
+## Run BUSCO
+
+```{bash eval = FALSE}
+conda activate /hb/groups/bernardi_lab/programs/busco_v5.2.2
+
+busco -i AAR_42_43_BigFile_ont_1000q3.ctg.fa -o busco_1000 -l actinopterygii_odb10 -m genome --cpu 24
+
+
+        --------------------------------------------------
+        |Results from dataset actinopterygii_odb10        |
+        --------------------------------------------------
+        |C:92.7%[S:92.0%,D:0.7%],F:1.7%,M:5.6%,n:3640     |
+        |3372   Complete BUSCOs (C)                       |
+        |3347   Complete and single-copy BUSCOs (S)       |
+        |25     Complete and duplicated BUSCOs (D)        |
+        |61     Fragmented BUSCOs (F)                     |
+        |207    Missing BUSCOs (M)                        |
+        |3640   Total BUSCO groups searched               |
+        --------------------------------------------------
+```
+
+## Minimap2: maps your clean_raw reads to your assembly with minimap
+
+```{bash eval = FALSE}
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/minimap2
+
+minimap2 -ax map-ont -t 24 AAR_42_43_BigFile_ont_1000q3.ctg.fa AAR_42_43_BigFile_pc_500q5.fastq.gz > AAR_42_43_1000_500_q3q5_mmap.sam
+```
+
+
+
+## Racon: makes a consensus sequence
+
+```{bash eval = FALSE}
+conda activate /hb/groups/bernardi_lab/programs/racon
+
+racon -u -m 5 -x -4 -g -8 -w 500 -t 24 AAR_42_43_BigFile_pc_500q5.fastq.gz AAR_42_43_1000_500_q3q5_mmap.sam AAR_42_43_BigFile_ont_1000q3.ctg.fa > AAR_42_43_1000_500_q3q5_racon.fasta
+```
+
+
+## final assembly stats
+```{bash eval = FALSE}
+module load miniconda3.9
+
+conda activate /hb/groups/bernardi_lab/programs/assembly_stats
+
+assembly-stats AAR_42_43_1000_500_q3q5_racon.fasta > AAR_42_43_1000_500_q3q5_racon.fasta_assemblystats
+```
+
+
+
+
